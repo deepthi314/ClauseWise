@@ -1,0 +1,14 @@
+
+---
+
+## ⚙️ 5️⃣ `hf_space_config.yaml`
+
+```yaml
+title: "ClauseWise"
+emoji: "⚖️"
+colorFrom: "blue"
+colorTo: "purple"
+sdk: "streamlit"
+sdk_version: "1.25.0"
+app_file: "app.py"
+pinned: false
