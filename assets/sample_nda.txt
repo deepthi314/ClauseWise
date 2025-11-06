@@ -1,3 +1,7 @@
-NON-DISCLOSURE AGREEMENT (NDA)
-This Agreement is made between Acme Corp and John Doe on January 1, 2024.
-Both parties agree to maintain confidentiality of all shared information…
+NON-DISCLOSURE AGREEMENT
+
+This Non-Disclosure Agreement ("Agreement") is entered into as of January 1, 2024 between Acme Corporation (the "Disclosing Party") and John Smith (the "Receiving Party").
+
+1. Definition of Confidential Information: "Confidential Information" shall mean all non-public information...
+2. Term and Termination: This Agreement shall remain in effect for a period of 5 years...
+3. Remedies: In the event of breach, remedies may include injunctive relief and monetary damages up to $50,000.
