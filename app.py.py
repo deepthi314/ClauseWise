@@ -2,302 +2,537 @@ import streamlit as st
 import tempfile
 import os
 import re
-from cryptography.fernet import Fernet
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline, AutoModelForTokenClassification
-from PyPDF2 import PdfReader
-from docx import Document
-import plotly.express as px
-import pandas as pd
+import io
+import json
+from typing import List, Dict, Tuple, Any, Optional
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from pypdf import PdfReader
+import docx
+import spacy
+import math
+import time
 
 # -------------------------
 # PAGE CONFIG
 # -------------------------
-st.set_page_config(page_title="ClauseWise: Legal Document Analyzer",
-                   page_icon="⚖️", layout="wide")
-
-st.title("⚖️ ClauseWise: Legal Document Analyzer")
-st.markdown("""
-**Simplify, Decode, and Classify Legal Documents using AI**  
-Your smart assistant for understanding contracts, clauses, and obligations.
-""")
-st.markdown("---")
+st.set_page_config(page_title="ClauseWise – Granite 3.2 (2B) Legal Assistant", page_icon="⚖️", layout="wide")
 
 # -------------------------
-# ENCRYPTION UTILITIES
+# MODEL SETUP WITH OPTIMIZATIONS
 # -------------------------
-def get_session_key():
-    if "enc_key" not in st.session_state:
-        st.session_state["enc_key"] = Fernet.generate_key()
-    return st.session_state["enc_key"]
+MODEL_ID = "ibm-granite/granite-3.2-2b-instruct"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-def encrypt_bytes(data: bytes, key: bytes) -> bytes:
-    cipher = Fernet(key)
-    return cipher.encrypt(data)
-
-def decrypt_bytes(token: bytes, key: bytes) -> bytes:
-    cipher = Fernet(key)
-    return cipher.decrypt(token)
-
-def write_temp_encrypted_file(encrypted_bytes: bytes):
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    tmp.write(encrypted_bytes)
-    tmp.flush()
-    tmp.close()
-    return tmp.name
-
-def secure_delete(path: str):
+@st.cache_resource
+def load_llm_model():
     try:
-        if os.path.exists(path):
-            os.remove(path)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            torch_dtype=DTYPE,
+            device_map="auto" if DEVICE == "cuda" else None,
+            trust_remote_code=True
+        )
+        if DEVICE != "cuda":
+            model.to(DEVICE)
+        return tokenizer, model
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        return None, None
+
+tokenizer, model = load_llm_model()
+
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    st.warning("spaCy model 'en_core_web_sm' not found. Please install with: python -m spacy download en_core_web_sm")
+    nlp = None
+
+# -------------------------
+# OPTIMIZED HELPER FUNCTIONS
+# -------------------------
+def build_chat_prompt(system_prompt: str, user_prompt: str) -> str:
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_prompt})
+    try:
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     except Exception:
-        pass
+        sys = f"<|system|>\n{system_prompt}\n" if system_prompt else ""
+        usr = f"<|user|>\n{user_prompt}\n<|assistant|>\n"
+        return sys + usr
+
+def llm_generate_optimized(system_prompt: str, user_prompt: str, max_new_tokens=256, temperature=0.3, top_p=0.9) -> str:
+    if model is None or tokenizer is None:
+        return "Model not available. Please check model loading."
+    
+    try:
+        prompt = build_chat_prompt(system_prompt, user_prompt)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(DEVICE)
+        
+        with torch.inference_mode():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.1,
+                early_stopping=True
+            )
+        
+        full_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        
+        # Extract assistant response more efficiently
+        if "<|assistant|>" in full_text:
+            response = full_text.split("<|assistant|>")[-1].strip()
+        elif full_text.startswith(prompt):
+            response = full_text[len(prompt):].strip()
+        else:
+            response = full_text.strip()
+            
+        return response
+    except Exception as e:
+        return f"Error generating response: {str(e)}"
 
 # -------------------------
-# FILE EXTRACTION
+# DOCUMENT LOADING
 # -------------------------
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
-    text = ""
+def load_text_from_pdf(file_obj) -> str:
     try:
-        reader = PdfReader(tmp_path)
+        reader = PdfReader(file_obj)
+        pages = []
         for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    except Exception:
-        text = ""
-    secure_delete(tmp_path)
-    return text
+            try:
+                text = page.extract_text() or ""
+                pages.append(text)
+            except Exception:
+                pages.append("")
+        return "\n".join(pages).strip()
+    except Exception as e:
+        return f"Error reading PDF: {str(e)}"
 
-def extract_text_from_docx(file_bytes: bytes) -> str:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
-    text = ""
+def load_text_from_docx(file_obj) -> str:
     try:
-        doc = Document(tmp_path)
-        text = "\n".join([p.text for p in doc.paragraphs])
-    except Exception:
-        text = ""
-    secure_delete(tmp_path)
-    return text
+        data = file_obj.read()
+        file_obj.seek(0)
+        f = io.BytesIO(data)
+        doc = docx.Document(f)
+        paras = [p.text for p in doc.paragraphs if p.text.strip()]
+        return "\n".join(paras).strip()
+    except Exception as e:
+        return f"Error reading DOCX: {str(e)}"
 
-def extract_text_from_txt(file_bytes: bytes) -> str:
+def load_text_from_txt(file_obj) -> str:
     try:
-        return file_bytes.decode("utf-8", errors="ignore")
-    except Exception:
+        data = file_obj.read()
+        if isinstance(data, bytes):
+            try:
+                data = data.decode("utf-8", errors="ignore")
+            except:
+                data = data.decode("latin-1", errors="ignore")
+        return str(data).strip()
+    except Exception as e:
+        return f"Error reading TXT: {str(e)}"
+
+def load_document(file) -> str:
+    if not file:
+        return ""
+    name = (file.name or "").lower()
+    
+    if name.endswith(".pdf"):
+        return load_text_from_pdf(file)
+    elif name.endswith(".docx"):
+        return load_text_from_docx(file)
+    elif name.endswith(".txt"):
+        return load_text_from_txt(file)
+    else:
+        return "Unsupported file format"
+
+def get_text_from_inputs(file, text):
+    file_text = load_document(file) if file else ""
+    user_text = (text or "").strip()
+    
+    if file_text and not user_text:
+        return file_text
+    elif user_text and not file_text:
+        return user_text
+    elif file_text and user_text:
+        return file_text if len(file_text) > len(user_text) else user_text
+    else:
         return ""
 
 # -------------------------
-# CLEAN / PREPROCESS
+# CLAUSE PROCESSING
 # -------------------------
-def clean_text(text: str) -> str:
-    patterns = [
-        r"Downloaded from[^\n]*\n?",
-        r"Appears in \d+ contracts[^\n]*\n?",
-        r"I'm 5:.*\n?",
-        r"I'm 5 or Appears in.*\n?",
-        r"(Employee Signature Date:.*?Title:\s*\d*)+",
-    ]
-    for p in patterns:
-        text = re.sub(p, "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
+CLAUSE_SPLIT_REGEX = re.compile(r"(?:(?:^\s*\d+(?:\.\d+)*[.)]\s+)|(?:^\s*[•\-*]\s+)|(?:\n\s*\n))", re.MULTILINE)
 
-# -------------------------
-# MODEL CACHE (Hugging Face only)
-# -------------------------
-@st.cache_resource(ttl=3600)
-def load_models():
-    simplify_model_name = "mrm8488/t5-small-finetuned-text-simplification"
-    tokenizer = AutoTokenizer.from_pretrained(simplify_model_name)
-    simplify_model = AutoModelForSeq2SeqLM.from_pretrained(simplify_model_name)
-    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-    ner_pipeline = pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
-    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
-    return tokenizer, simplify_model, summarizer, ner_pipeline, classifier
-
-tokenizer, simplify_model, summarizer, ner_pipeline, classifier = load_models()
+def split_into_clauses(text: str, min_len: int = 20) -> List[str]:
+    if not text or not text.strip():
+        return []
+    
+    # First try splitting by common clause patterns
+    parts = re.split(CLAUSE_SPLIT_REGEX, text)
+    
+    # If that doesn't work well, try sentence splitting
+    if len(parts) < 2:
+        parts = re.split(r"(?<=[.;!?])\s+(?=[A-Z])", text)
+    
+    clauses = [p.strip() for p in parts if p and len(p.strip()) >= min_len]
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique = []
+    for c in clauses:
+        # Simple normalization for comparison
+        key = re.sub(r'\s+', ' ', c.lower()).strip()
+        if key and key not in seen and len(c) >= min_len:
+            seen.add(key)
+            unique.append(c)
+    
+    return unique
 
 # -------------------------
-# CORE AI FEATURES
+# FAST CLAUSE SIMPLIFICATION
 # -------------------------
-def clause_simplification(text, mode):
-    if not text:
-        return "No text to simplify."
-    prefix = {
-        "Simplified": "simplify: ",
-        "Explain like I'm 5": "explain like I'm 5: ",
-        "Professional": "rephrase professionally: "
-    }.get(mode, "simplify: ")
-    inputs = tokenizer(prefix + text, return_tensors="pt", truncation=True, max_length=512)
-    outputs = simplify_model.generate(**inputs, max_length=256, num_beams=4, early_stopping=True)
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+def simplify_clause_fast(clause: str) -> str:
+    if not clause.strip():
+        return "Please provide a clause to simplify."
+    
+    # Quick validation for very short clauses
+    if len(clause.strip()) < 10:
+        return "Clause is too short for meaningful simplification."
+    
+    # Limit clause length for faster processing
+    processed_clause = clause[:1500]  # Process only first 1500 chars
+    
+    system_prompt = """You are a legal assistant that rewrites complex legal clauses into plain, understandable English. 
+    Be concise and focus on the main points. Keep responses under 200 words."""
+    
+    user_prompt = f"""Rewrite this legal clause in simple English. Focus on the key obligations and rights:
 
-def clause_extraction(text):
-    matches = re.findall(r'(Section\s+\d+[\w\.\-]*[:\-]?\s*[A-Z][^\n]+)', text)
-    return list(dict.fromkeys(matches)) if matches else ["Section 1.F: Base Rent"]
+{processed_clause}
 
-def named_entity_recognition(text):
-    entities = ner_pipeline(text[:2000])
-    grouped = {}
-    for ent in entities:
-        grouped.setdefault(ent["entity_group"], []).append(ent["word"])
-    return grouped
+Provide a clear, simple explanation:"""
 
-def document_classification(text):
-    labels = ["Lease Agreement", "Employment Contract", "NDA", "Purchase Agreement"]
-    result = classifier(text[:1024], candidate_labels=labels)
-    return result["labels"][0]
+    start_time = time.time()
+    result = llm_generate_optimized(
+        system_prompt, 
+        user_prompt, 
+        max_new_tokens=200,  # Reduced from 400
+        temperature=0.4
+    )
+    end_time = time.time()
+    
+    st.sidebar.info(f"Simplification took {end_time - start_time:.1f} seconds")
+    
+    return result
 
-def flag_risky_clauses(text):
-    risky = re.findall(r"(penalty|termination|breach|liability|indemnity)", text, flags=re.IGNORECASE)
-    return [f"Clause mentioning '{w}' requires review." for w in set(risky)] or ["No high-risk clauses detected."]
+def simplify_clause_with_progress(clause: str) -> str:
+    """Simplification with progress indicators"""
+    if not clause.strip():
+        return "Please provide a clause to simplify."
+    
+    # Show progress
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    status_text.text("Initializing simplification...")
+    progress_bar.progress(10)
+    time.sleep(0.5)
+    
+    # Check if model is available
+    if model is None:
+        progress_bar.progress(100)
+        status_text.text("Using basic simplification (model not available)")
+        return "Model not available. Please check if the model loaded correctly."
+    
+    status_text.text("Analyzing legal language...")
+    progress_bar.progress(30)
+    time.sleep(0.5)
+    
+    status_text.text("Generating plain English version...")
+    progress_bar.progress(60)
+    
+    # Use the optimized LLM call
+    result = simplify_clause_fast(clause)
+    
+    progress_bar.progress(90)
+    status_text.text("Finalizing output...")
+    time.sleep(0.5)
+    
+    progress_bar.progress(100)
+    status_text.text("Simplification complete!")
+    time.sleep(1)
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
+    return result
 
-def fairness_assessment(text):
-    pos = len(re.findall(r"(mutual|both parties|shared)", text, flags=re.IGNORECASE))
-    neg = len(re.findall(r"(sole|unilateral|exclusive right)", text, flags=re.IGNORECASE))
-    score = max(0, min(100, 70 + pos - neg * 2))
-    return f"Fairness Score: {score}%"
+def simplify_clause(clause: str) -> str:
+    """Main simplification function"""
+    return simplify_clause_with_progress(clause)
 
-def ai_contract_assistant(text):
-    suggestion = re.search(r"penalty|termination", text, flags=re.IGNORECASE)
-    if suggestion:
-        return "Suggested negotiation: Reduce penalty duration or clarify termination terms."
-    return "No immediate negotiation points detected."
-
-def multilingual_support(text, target_language):
+def ner_entities(text: str) -> Dict[str, List[str]]:
+    if not text or not text.strip():
+        return {}
+    
+    if nlp is None:
+        return {"ERROR": ["spaCy model not available. Please install en_core_web_sm"]}
+    
     try:
-        translator = pipeline("translation", model=f"Helsinki-NLP/opus-mt-en-{target_language.lower()[:2]}")
-        return translator(text[:1000])[0]["translation_text"]
-    except Exception:
-        return f"Translated to {target_language} (mock)."
+        # Process in chunks if text is too long
+        if len(text) > 1000000:  # ~1MB limit
+            text = text[:1000000]
+            
+        doc = nlp(text)
+        out: Dict[str, List[str]] = {}
+        
+        for ent in doc.ents:
+            out.setdefault(ent.label_, []).append(ent.text)
+        
+        # Remove duplicates and sort
+        out = {k: sorted(set(v)) for k, v in out.items()}
+        return out
+    except Exception as e:
+        return {"ERROR": [f"NER processing error: {str(e)}"]}
 
-def text_to_audio(text):
-    st.info("Text-to-speech support coming soon (use gTTS or pyttsx3).")
-
-# -------------------------
-# SMART CLAUSE-GROUPED TIMELINE + ENTITY PANEL
-# -------------------------
-def timeline_visualization(text):
-    clauses = clause_extraction(text)
-    entities = named_entity_recognition(text)
-    events = []
-
-    date_matches = re.finditer(
-        r'((?:Section|Clause)\s[\dA-Za-z\.\-]+[^\n:]*[:\-]?\s*[^\n]*)|(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}',
-        text)
-
-    current_clause = "General"
-    for m in date_matches:
-        if m.group(1):
-            current_clause = m.group(1).strip()
-        elif m.group(2):
-            events.append({"Clause": current_clause, "Date": m.group(2)})
-
-    if not events:
-        st.warning("No dates or timeline events detected.")
-        return
-
-    df = pd.DataFrame(events)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"])
-
-    st.subheader("📊 Contract Timeline by Clause")
-    fig = px.timeline(df, x_start="Date", x_end="Date", y="Clause", color="Clause", title="Clause-Wise Timeline")
-    fig.update_yaxes(autorange="reversed")
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("### 🧾 Clause-Level Details")
-    for clause in df["Clause"].unique():
-        clause_dates = df[df["Clause"] == clause]["Date"].dt.strftime("%b %d, %Y").tolist()
-        clause_entities = {k: v[:3] for k, v in entities.items()} if entities else {}
-        with st.expander(f"📘 {clause}"):
-            st.write(f"**Dates Mentioned:** {', '.join(clause_dates) if clause_dates else 'None'}")
-            if clause_entities:
-                st.write("**Entities Detected:**")
-                st.json(clause_entities)
-            else:
-                st.write("No named entities found for this clause.")
+def extract_clauses(text: str) -> List[str]:
+    return split_into_clauses(text)
 
 # -------------------------
-# MAIN UI
+# DOCUMENT CLASSIFICATION
 # -------------------------
-st.subheader("📁 Upload a Legal Document")
-uploaded_file = st.file_uploader("Choose a document (PDF, DOCX, or TXT)", type=["pdf", "docx", "txt"])
+DOC_TYPES = [
+    "Non-Disclosure Agreement (NDA)",
+    "Lease Agreement",
+    "Employment Contract",
+    "Service Agreement",
+    "Sales Agreement",
+    "Consulting Agreement",
+    "End User License Agreement (EULA)",
+    "Terms of Service",
+    "Partnership Agreement",
+    "Loan Agreement"
+]
 
-if uploaded_file:
-    key = get_session_key()
-    raw_bytes = uploaded_file.read()
-    encrypted_bytes = encrypt_bytes(raw_bytes, key)
-    temp_encrypted_path = write_temp_encrypted_file(encrypted_bytes)
-    decrypted_bytes = decrypt_bytes(encrypted_bytes, key)
+def classify_document(text: str) -> str:
+    if not text or not text.strip():
+        return "No text provided for classification"
+    
+    system_prompt = """You are a legal document classification expert. Analyze the provided text and determine the most appropriate document type from the given list."""
+    
+    labels = "\n".join(f"- {t}" for t in DOC_TYPES)
+    user_prompt = f"""Classify the following legal document into one of these types:
 
-    filename_lower = uploaded_file.name.lower()
-    if filename_lower.endswith(".pdf"): 
-        content = extract_text_from_pdf(decrypted_bytes)
-    elif filename_lower.endswith(".docx"): 
-        content = extract_text_from_docx(decrypted_bytes)
-    else: 
-        content = extract_text_from_txt(decrypted_bytes)
-    secure_delete(temp_encrypted_path)
+Available types:
+{labels}
 
-    if not content.strip():
-        st.warning("No readable text found in the document.")
-    else:
-        st.markdown("---")
-        st.subheader("🔍 Apply Features")
+Document text (first 3000 characters):
+{text[:3000]}
 
-        mode = st.radio("Choose simplification level:", ["Explain like I'm 5", "Simplified", "Professional"])
-        if st.button("🧾 Simplify Clauses"):
-            with st.spinner("Simplifying..."):
-                st.write(clause_simplification(content, mode))
-        st.markdown("---")
+Provide only the most appropriate document type from the list above."""
 
-        if st.button("🔗 Extract Entities"):
-            st.json(named_entity_recognition(content))
-        st.markdown("---")
+    resp = llm_generate_optimized(system_prompt, user_prompt, max_new_tokens=100)
+    
+    # Simple matching as fallback
+    resp_lower = resp.lower()
+    text_lower = text.lower()
+    
+    for doc_type in DOC_TYPES:
+        if any(keyword in resp_lower for keyword in doc_type.lower().split()):
+            return doc_type
+    
+    # If no match from LLM, try keyword matching
+    if "confidential" in text_lower or "non-disclosure" in text_lower or "nda" in text_lower:
+        return "Non-Disclosure Agreement (NDA)"
+    elif "lease" in text_lower or "tenant" in text_lower or "landlord" in text_lower:
+        return "Lease Agreement"
+    elif "employment" in text_lower or "employee" in text_lower or "employer" in text_lower:
+        return "Employment Contract"
+    elif "service" in text_lower and "agreement" in text_lower:
+        return "Service Agreement"
+    elif "sale" in text_lower or "purchase" in text_lower:
+        return "Sales Agreement"
+    elif "consulting" in text_lower:
+        return "Consulting Agreement"
+    elif "eula" in text_lower or "end user" in text_lower:
+        return "End User License Agreement (EULA)"
+    elif "terms of service" in text_lower or "terms and conditions" in text_lower:
+        return "Terms of Service"
+    
+    return "Unknown Document Type"
 
-        if st.button("📑 Extract Clauses"):
-            st.write(clause_extraction(content))
-        st.markdown("---")
+# -------------------------
+# OPTIMIZED UI
+# -------------------------
 
-        if st.button("📂 Classify Document"):
-            st.success(document_classification(content))
-        st.markdown("---")
+st.title("ClauseWise – Granite 3.2 (2B) Legal Assistant")
+st.markdown("Upload a PDF/DOCX/TXT or paste text below. Tabs provide different legal analysis tools.")
 
-        if st.button("🚨 Flag Risky Clauses"):
-            st.warning(flag_risky_clauses(content))
-        st.markdown("---")
+with st.sidebar:
+    st.header("Document Input")
+    uploaded_file = st.file_uploader("Upload PDF/DOCX/TXT", type=["pdf","docx","txt"])
+    pasted_text = st.text_area("Or paste text here", height=200, placeholder="Paste your legal text here...")
+    
+    # Performance info
+    st.header("Performance Tips")
+    st.info("""
+    - Keep clauses under 1500 characters for faster processing
+    - Use specific clauses rather than entire documents
+    - Model loads faster on GPU (CUDA)
+    """)
+    
+    if uploaded_file:
+        st.info(f"Uploaded: {uploaded_file.name}")
+    if pasted_text:
+        st.info("Text input received")
 
-        if st.button("📅 Timeline Visualization"):
-            timeline_visualization(content)
-        st.markdown("---")
+# Get text data
+text_data = get_text_from_inputs(uploaded_file, pasted_text)
 
-        if st.button("⚖️ Fairness Assessment"):
-            st.info(fairness_assessment(content))
-        st.markdown("---")
-
-        if st.button("🤝 Contract Assistant"):
-            st.write(ai_contract_assistant(content))
-        st.markdown("---")
-
-        lang = st.selectbox("🌐 Choose Language", ["French", "Spanish", "German"])
-        if st.button("Translate Document"):
-            st.write(multilingual_support(content, lang))
-        st.markdown("---")
-
-        if st.button("🔊 Convert Text to Audio"):
-            text_to_audio(content)
-
+# Show text preview with length info
+if text_data and text_data not in ["", "Unsupported file format"]:
+    with st.expander(f"Preview Extracted Text ({len(text_data)} characters)", expanded=False):
+        st.text_area("Text Preview", text_data[:1500] + ("..." if len(text_data) > 1500 else ""), height=200, key="preview")
+        if len(text_data) > 1500:
+            st.warning(f"Document is large ({len(text_data)} characters). For faster processing, consider analyzing specific clauses.")
 else:
-    st.info("👆 Upload a document above to start analysis.")
+    st.warning("Please upload a document or paste text to get started")
 
-st.markdown(
-    "<p style='text-align: center; font-style: italic; color: gray;'>"
-    "Important: ClauseWise provides educational information only. This is not legal advice."
-    "</p>", unsafe_allow_html=True
-)
+# Create only the core working tabs
+tabs = st.tabs([
+    "🚀 Clause Simplification", 
+    "🔍 Named Entity Recognition", 
+    "📑 Clause Extraction",
+    "📊 Document Classification"
+])
+
+# Tab 1: OPTIMIZED Clause Simplification
+with tabs[0]:
+    st.header("Clause Simplification")
+    st.markdown("Convert complex legal language into plain English")
+    
+    # Smart input selection
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        clause_input = st.text_area(
+            "Enter specific clause to simplify:", 
+            height=120, 
+            placeholder="Paste a complex legal clause here (recommended: under 1500 characters)...",
+            key="simplify_input"
+        )
+    
+    with col2:
+        st.markdown("### Options")
+        use_document_text = st.checkbox(
+            "Use uploaded document", 
+            value=not bool(clause_input.strip()),
+            help="Use the entire uploaded document for simplification"
+        )
+    
+    # Character count and warnings
+    if clause_input.strip():
+        char_count = len(clause_input)
+        if char_count > 1500:
+            st.warning(f"Clause is long ({char_count} characters). This may take longer to process.")
+        else:
+            st.info(f"Clause length: {char_count} characters")
+    
+    if st.button("Simplify Clause", key="simplify", type="primary", use_container_width=True):
+        if use_document_text and text_data and text_data not in ["", "Unsupported file format"]:
+            if len(text_data) > 2000:
+                st.warning("Document is large. Simplifying first 1500 characters for speed.")
+                target = text_data[:1500]
+            else:
+                target = text_data
+            source = "uploaded document"
+        elif clause_input.strip():
+            target = clause_input
+            source = "text input"
+        else:
+            st.error("Please provide a clause to simplify either through text input or document upload")
+            target = None
+            
+        if target:
+            result = simplify_clause_with_progress(target)
+            
+            st.subheader("Simplified Output")
+            
+            # Display result in a nice container
+            with st.container():
+                st.success("✅ Simplification Complete")
+                st.text_area(
+                    "Plain English Version", 
+                    result, 
+                    height=300,
+                    key="result_output"
+                )
+                
+                # Add some metrics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Original Length", f"{len(target)} chars")
+                with col2:
+                    st.metric("Simplified Length", f"{len(result)} chars")
+                with col3:
+                    reduction = max(0, len(target) - len(result))
+                    st.metric("Reduction", f"{reduction} chars")
+
+# Tab 2: Named Entity Recognition
+with tabs[1]:
+    st.header("Named Entity Recognition")
+    st.markdown("Identify people, organizations, dates, and other entities in your legal documents")
+    
+    if st.button("Extract Entities", key="ner", type="primary"):
+        if text_data and text_data not in ["", "Unsupported file format"]:
+            with st.spinner("Analyzing entities..."):
+                entities = ner_entities(text_data)
+                st.subheader("Extracted Entities")
+                st.json(entities)
+        else:
+            st.error("Please upload a document or paste text first")
+
+# Tab 3: Clause Extraction
+with tabs[2]:
+    st.header("Clause Extraction")
+    st.markdown("Automatically identify and extract individual clauses from legal documents")
+    
+    if st.button("Extract Clauses", key="extract", type="primary"):
+        if text_data and text_data not in ["", "Unsupported file format"]:
+            with st.spinner("Extracting clauses..."):
+                clauses = extract_clauses(text_data)
+                st.subheader(f"Found {len(clauses)} Clauses")
+                
+                if clauses:
+                    for i, clause in enumerate(clauses, 1):
+                        with st.expander(f"Clause {i} (Length: {len(clause)} chars)"):
+                            st.text(clause)
+                else:
+                    st.info("No clauses could be automatically extracted. Try using the full text in other analysis tools.")
+        else:
+            st.error("Please upload a document or paste text first")
+
+# Tab 4: Document Classification
+with tabs[3]:
+    st.header("Document Classification")
+    st.markdown("Automatically identify the type of legal document")
+    
+    if st.button("Classify Document", key="classify", type="primary"):
+        if text_data and text_data not in ["", "Unsupported file format"]:
+            with st.spinner("Analyzing document type..."):
+                doc_type = classify_document(text_data)
+                st.subheader("Document Classification")
+                st.info(f"**Predicted Document Type:** {doc_type}")
+        else:
+            st.error("Please upload a document or paste text first")
+
+st.markdown("---")
+st.caption("ClauseWise Legal Assistant - Powered by Granite 3.2 2B Model | Core Features Only")
