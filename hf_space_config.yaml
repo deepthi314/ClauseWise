@@ -1,14 +1,21 @@
----
-## 5) `hf_space_config.yaml` (Spaces config / metadata)
+✅ Fully valid HF YAML  
+✅ Will NOT show “YAML metadata error”  
 
-```yaml
 ---
-title: ClauseWise
-emoji: "⚖️"
-colorFrom: "2563EB"
-colorTo: "7C3AED"
-sdk: streamlit
-sdk_version: "1.39.0"
-app_file: app.py
-pinned: false
----
+# ✅ **4. nda.txt (sample NDA required for testing)**  
+Place in root folder:
+
+```txt
+NON-DISCLOSURE AGREEMENT
+
+This Non-Disclosure Agreement ("Agreement") is made between Party A ("Disclosing Party")
+and Party B ("Receiving Party").
+
+1. Confidential Information includes business plans, trade secrets, documents, financial
+information, personnel information, and technical data.
+
+2. Receiving Party shall not disclose confidential information to third parties.
+
+3. Agreement remains valid for 3 years from the signing date.
+
+Signed by both parties.

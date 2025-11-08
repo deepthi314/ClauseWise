@@ -1,0 +1,13 @@
+{
+    "nda": {
+      "kb_hint": "Typical NDA includes: definition of confidential information, purpose limitation, non-use, non-disclosure, standard carve-outs (public domain, already known, independently developed, required by law), duration 2-3 years post-termination, return or destroy, injunctive relief, governing law.",
+      "risks": [
+        "Overbroad definition without carve-outs",
+        "Perpetual confidentiality with no time limit",
+        "No return/destroy requirement",
+        "Injunctive relief without notice/cure",
+        "One-way obligations only"
+      ],
+      "negotiation_tip": "Narrow confidential info definition, include carve-outs, set survival 2 years, define purpose, add mutuality where appropriate."
+    }
+  }

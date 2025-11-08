@@ -1,7 +1,10 @@
-NON-DISCLOSURE AGREEMENT
+NON-DISCLOSURE AGREEMENT (Sample)
 
-This Non-Disclosure Agreement ("Agreement") is entered into as of January 1, 2024 between Acme Corporation (the "Disclosing Party") and John Smith (the "Receiving Party").
+This Agreement is made between Alice Roberts (“Disclosing Party”) and
+Bob Martins (“Receiving Party”).
 
-1. Definition of Confidential Information: "Confidential Information" shall mean all non-public information...
-2. Term and Termination: This Agreement shall remain in effect for a period of 5 years...
-3. Remedies: In the event of breach, remedies may include injunctive relief and monetary damages up to $50,000.
+The parties agree to protect Confidential Information for a period of
+three (3) years. Confidential Information includes any non-public,
+proprietary, or sensitive business data.
+
+Confidentiality obligations survive termination.
